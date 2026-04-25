@@ -1,0 +1,70 @@
+# =========================================================
+# AUTH SERVICE — Configuratie Keycloak
+# Responsabilitate: Dan
+# =========================================================
+#
+# Acest fisier descrie configuratia realm-ului Keycloak
+# folosit de aplicatia Skylanders Shop.
+#
+# In productie, realm-ul se importa automat prin comanda:
+#   start-dev --import-realm
+# si fisierul JSON de realm trebuie plasat in:
+#   /opt/keycloak/data/import/
+
+# =========================================================
+# PARAMETRI SERVICIU (pentru docker-compose)
+# =========================================================
+service:
+  image: quay.io/keycloak/keycloak:22.0.0
+  env:
+    KC_DB: postgres
+    KC_DB_URL: jdbc:postgresql://db:5432/keycloak
+    KC_PROXY: edge
+
+# =========================================================
+# CONFIGURATIA REALM: skylander_shop
+# =========================================================
+realm:
+  name: skylander_shop
+  displayName: Skylander Paradise Shop
+  enabled: true
+  registrationAllowed: true
+  loginWithEmailAllowed: true
+  duplicateEmailsAllowed: false
+  resetPasswordAllowed: true
+
+  # Roluri definite in realm
+  roles:
+    - name: user
+      description: Utilizator standard — poate cumpara produse
+    - name: seller
+      description: Vanzator — poate adauga si sterge produse proprii
+    - name: admin
+      description: Administrator — acces complet, poate sterge orice produs
+
+  # Client folosit de Frontend (public client, fara secret)
+  clients:
+    - clientId: skylander-frontend
+      publicClient: true
+      redirectUris:
+        - "http://localhost/*"
+        - "http://127.0.0.1/*"
+      webOrigins:
+        - "*"
+      standardFlowEnabled: true
+      directAccessGrantsEnabled: true
+
+# =========================================================
+# NOTE INTEGRARE
+# =========================================================
+# Backend-ul (app.scala) se autentifica ca admin-cli pentru
+# a crea useri noi si a le asigna roluri. Credentialele
+# admin sunt injectate prin Docker Secrets la runtime.
+#
+# Flow autentificare:
+#   1. User se inregistreaza via /api/register (Backend -> Keycloak Admin API)
+#   2. User se logheaza direct prin Keycloak (Frontend -> /realms/skylander_shop/...)
+#   3. Keycloak emite JWT token
+#   4. Frontend trimite token-ul in header Authorization: Bearer <token>
+#   5. Backend valideaza token-ul local (decode Base64 JWT, nu apel extern)
+# =========================================================

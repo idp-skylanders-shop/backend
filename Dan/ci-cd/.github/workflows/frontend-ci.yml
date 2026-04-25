@@ -1,0 +1,47 @@
+name: Frontend CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'frontend/Dan/**'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/Dan/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend/Dan
+        run: npm ci
+
+      - name: Build React app
+        working-directory: frontend/Dan
+        run: npm run build
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend/Dan
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-frontend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-frontend:${{ github.sha }}
