@@ -1,0 +1,269 @@
+version: "3.8"
+
+networks:
+  traefik-public:
+    driver: overlay
+    attachable: true
+
+services:
+  # ==========================================
+  # 1. TRAEFIK ( Reverse Proxy si Load Balancer )
+  # ==========================================
+  traefik:
+    image: traefik:v3.1
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+      - "--entrypoints.web.address=:80"
+      - "--providers.swarm=true"
+      - "--providers.swarm.endpoint=unix:///var/run/docker.sock"
+      - "--providers.swarm.exposedbydefault=false"
+    ports:
+      - "80:80"
+      - "8088:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - traefik-public
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+
+  # ==========================================
+  # 2. BACKEND SERVICE
+  # ==========================================
+  backend:
+    image: skylanders-backend:latest
+    build: ./backend-service
+    deploy:
+      mode: replicated
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 10s
+      restart_policy:
+        condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.backend.rule=PathPrefix(`/api`)"
+        - "traefik.http.services.backend.loadbalancer.server.port=8080"
+    depends_on:
+      - db
+      - rabbitmq
+    environment:
+      - DB_HOST=db
+      - DB_NAME=skylanders_shop
+      - RABBITMQ_HOST=rabbitmq
+    volumes:
+      - ../../frontend/Dan/public/assets:/app/uploads
+    networks:
+      - traefik-public
+    secrets:
+      - db_user
+      - db_password
+      - rabbitmq_user
+      - rabbitmq_pass
+    command: java -cp app.jar app.App
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export DB_USER=$$(cat /run/secrets/db_user)
+        export DB_PASSWORD=$$(cat /run/secrets/db_password)
+        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
+        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
+        echo "--> Starting Backend with command: $$@"
+        exec "$$@"
+      - --
+
+  # ==========================================
+  # 3. EMAIL WORKER
+  # (imaginea se creeaza cu: docker tag skylanders-backend:latest skylanders-email-worker:latest)
+  # ==========================================
+  email-worker:
+    image: skylanders-email-worker:latest
+    deploy:
+      replicas: 1
+    depends_on:
+      - rabbitmq
+    secrets:
+      - smtp_user
+      - smtp_pass
+      - rabbitmq_user
+      - rabbitmq_pass
+    networks:
+      - traefik-public
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - SMTP_HOST=sandbox.smtp.mailtrap.io
+      - SMTP_PORT=587
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export SMTP_USER=$$(cat /run/secrets/smtp_user)
+        export SMTP_PASS=$$(cat /run/secrets/smtp_pass)
+        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
+        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
+        echo "Starting EmailWorker..."
+        exec java -cp app.jar app.EmailWorker
+
+  # ==========================================
+  # 4. RABBITMQ
+  # ==========================================
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    deploy:
+      mode: global
+    networks:
+      - traefik-public
+    secrets:
+      - rabbitmq_user
+      - rabbitmq_pass
+    environment:
+      RABBITMQ_USER_FILE: /run/secrets/rabbitmq_user
+      RABBITMQ_PASS_FILE: /run/secrets/rabbitmq_pass
+
+  # ==========================================
+  # 5. FRONTEND
+  # ==========================================
+  frontend:
+    image: skylanders-frontend:latest
+    build: ../../frontend/Dan
+    depends_on:
+      - backend
+    volumes:
+      - ../../frontend/Dan/public/assets:/usr/share/nginx/html/assets
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+        - "traefik.http.services.frontend.loadbalancer.server.port=80"
+    networks:
+      - traefik-public
+
+  # ==========================================
+  # 6. BAZA DE DATE ( POSTGRESQL )
+  # ==========================================
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER_FILE: /run/secrets/db_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: skylanders_shop
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    secrets:
+      - db_user
+      - db_password
+    deploy:
+      replicas: 1
+    networks:
+      - traefik-public
+
+  # ==========================================
+  # 7. KEYCLOAK
+  # ==========================================
+  keycloak:
+    image: quay.io/keycloak/keycloak:22.0.0
+    environment:
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://db:5432/keycloak
+      - KC_DB_POOL_INITIAL_SIZE=5
+      - KC_DB_POOL_MIN_SIZE=5
+      - KC_DB_POOL_MAX_SIZE=10
+      - KC_PROXY=edge
+    depends_on:
+      - db
+    deploy:
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.keycloak.rule=PathPrefix(`/realms`) || PathPrefix(`/resources`) || PathPrefix(`/admin`) || PathPrefix(`/js`) || PathPrefix(`/welcome`)"
+        - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+    networks:
+      - traefik-public
+    secrets:
+      - keycloak_admin_user
+      - keycloak_admin_pass
+      - db_password
+      - db_user
+    command: start-dev --import-realm
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export KEYCLOAK_ADMIN=$$(cat /run/secrets/keycloak_admin_user)
+        export KEYCLOAK_ADMIN_PASSWORD=$$(cat /run/secrets/keycloak_admin_pass)
+        export KC_DB_PASSWORD=$$(cat /run/secrets/db_password)
+        export KC_DB_USERNAME=$$(cat /run/secrets/db_user)
+        exec /opt/keycloak/bin/kc.sh "$$@"
+      - --
+
+  # ==========================================
+  # 8. PORTAINER ( Management UI Docker Swarm )
+  # ==========================================
+  portainer:
+    image: portainer/portainer-ce:latest
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.portainer.rule=PathPrefix(`/portainer`)"
+        - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+    networks:
+      - traefik-public
+
+  # ==========================================
+  # 9. ADMINER ( UI Baza de Date )
+  # ==========================================
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8081:8080"
+    deploy:
+      replicas: 1
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.adminer.rule=PathPrefix(`/adminer`)"
+        - "traefik.http.services.adminer.loadbalancer.server.port=8080"
+    networks:
+      - traefik-public
+
+volumes:
+  postgres_data:
+    external: true
+  portainer_data:
+
+secrets:
+  db_host:
+    external: true
+  db_user:
+    external: true
+  db_password:
+    external: true
+  keycloak_admin_user:
+    external: true
+  keycloak_admin_pass:
+    external: true
+  smtp_user:
+    external: true
+  smtp_pass:
+    external: true
+  rabbitmq_user:
+    external: true
+  rabbitmq_pass:
+    external: true
