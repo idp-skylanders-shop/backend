@@ -6,7 +6,7 @@ Responsabil: Mihai
 
 Scop:
   Acest serviciu reprezinta inceputul decuplarii accesului
-  la baza de date de logica din Backend Service.
+  la baza de date de logica de business din Backend Service.
 
 Stare curenta (Etapa 2 — 40%):
   - Schelet creat (DataService.scala)

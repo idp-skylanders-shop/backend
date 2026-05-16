@@ -1,0 +1,33 @@
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  # Backend Service custom metrics (endpoint added in Etapa 3)
+  - job_name: 'backend-service'
+    static_configs:
+      - targets: ['backend:8080']
+    metrics_path: /metrics
+
+  # Data Service custom metrics (Etapa 3 microservice)
+  - job_name: 'data-service'
+    static_configs:
+      - targets: ['data-service:8082']
+    metrics_path: /metrics
+
+  # Kong API Gateway — expune metrici Prometheus pe portul 8001
+  - job_name: 'kong'
+    static_configs:
+      - targets: ['kong:8001']
+    metrics_path: /metrics
+
+  # RabbitMQ — necesita activarea plugin-ului rabbitmq_prometheus
+  - job_name: 'rabbitmq'
+    static_configs:
+      - targets: ['rabbitmq:15692']
+
+  # Node Exporter — metrici sistem pentru fiecare nod din cluster
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']

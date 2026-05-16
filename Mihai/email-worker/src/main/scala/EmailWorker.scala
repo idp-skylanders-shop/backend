@@ -16,8 +16,8 @@ object EmailWorker {
     val rabbitHost = sys.env.getOrElse("RABBITMQ_HOST", "rabbitmq")
     val factory = new ConnectionFactory()
     factory.setHost(rabbitHost)
-    factory.setUsername("guest")
-    factory.setPassword("guest")
+    factory.setUsername(sys.env.getOrElse("RABBITMQ_USER", "guest"))
+    factory.setPassword(sys.env.getOrElse("RABBITMQ_PASS", "guest"))
 
     // rabbitmq dureaza ceva sa fie pornit
     // trebuie sa incercam de cateva ori pana reusim sa ne conectam

@@ -1,0 +1,101 @@
+_format_version: "3.0"
+_transform: true
+
+# -------------------------------------------------------
+# Global plugins
+# -------------------------------------------------------
+plugins:
+  - name: prometheus
+    enabled: true
+    config:
+      status_code_metrics:    true
+      latency_metrics:        true
+      bandwidth_metrics:      true
+      upstream_health_metrics: true
+
+# -------------------------------------------------------
+# Services and routes
+# Route priority: longer/more-specific paths win over "/"
+# -------------------------------------------------------
+services:
+
+  # --- Backend API (business logic, no direct DB) ------
+  - name: backend-api
+    url: http://backend:8080
+    connect_timeout: 10000
+    read_timeout:    60000
+    write_timeout:   60000
+    routes:
+      - name: api-route
+        paths:
+          - /api
+        strip_path: false
+        methods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+
+  # --- Keycloak (auth & token endpoints) ---------------
+  - name: keycloak-auth
+    url: http://keycloak:8080
+    connect_timeout: 15000
+    read_timeout:    30000
+    write_timeout:   30000
+    routes:
+      - name: keycloak-route
+        paths:
+          - /realms
+          - /resources
+          - /js
+          - /welcome
+          - /auth
+        strip_path: false
+
+  # --- Grafana (observability dashboard) ---------------
+  - name: grafana-dash
+    url: http://grafana:3000
+    routes:
+      - name: grafana-route
+        paths:
+          - /grafana
+        strip_path: false
+
+  # --- Prometheus (raw metrics, for debug) -------------
+  - name: prometheus-ui
+    url: http://prometheus:9090
+    routes:
+      - name: prometheus-route
+        paths:
+          - /prometheus
+        strip_path: false
+
+  # --- Adminer (DB management UI) ----------------------
+  - name: adminer-ui
+    url: http://adminer:8080
+    routes:
+      - name: adminer-route
+        paths:
+          - /adminer
+        strip_path: false
+
+  # --- Portainer (Swarm management UI) -----------------
+  - name: portainer-ui
+    url: http://portainer:9000
+    routes:
+      - name: portainer-route
+        paths:
+          - /portainer
+        strip_path: false
+
+  # --- Frontend (React SPA — catch-all, MUST be last) --
+  - name: frontend-spa
+    url: http://frontend:80
+    routes:
+      - name: frontend-route
+        paths:
+          - /
+        strip_path: false
+        # Lower regex_priority => matched last, after all specific routes
+        regex_priority: 0

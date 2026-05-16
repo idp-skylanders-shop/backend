@@ -1,103 +1,178 @@
 version: "3.8"
 
+# =======================================================================
+# NETWORKS — 4 overlay networks for micro-segmentation
+#   frontend-net : Kong <-> Frontend
+#   kong-net     : Kong <-> all services it proxies (backends, UIs)
+#   backend-net  : Backend <-> DataService, RabbitMQ, EmailWorker, Prometheus
+#   db-net       : DataService + Keycloak <-> PostgreSQL; Adminer access
+# =======================================================================
 networks:
-  traefik-public:
+  frontend-net:
+    driver: overlay
+    attachable: true
+  kong-net:
+    driver: overlay
+    attachable: true
+  backend-net:
+    driver: overlay
+    attachable: true
+  db-net:
     driver: overlay
     attachable: true
 
+# =======================================================================
+# DOCKER CONFIGS — declarative config files injected into containers
+# All paths are relative to backend/Mihai/ (where this file lives)
+# =======================================================================
+configs:
+  kong_config:
+    file: ./kong.yml
+  rabbitmq_plugins:
+    file: ./rabbitmq_enabled_plugins
+  prometheus_config:
+    file: ./monitoring/prometheus/prometheus.yml
+  grafana_datasource:
+    file: ./monitoring/grafana/provisioning/datasources/prometheus.yml
+  grafana_dashboards_provider:
+    file: ./monitoring/grafana/provisioning/dashboards/dashboards.yml
+  grafana_dashboard_skylanders:
+    file: ./monitoring/grafana/provisioning/dashboards/skylanders.json
+
+# =======================================================================
+# SERVICES
+# =======================================================================
 services:
-  # ==========================================
-  # 1. TRAEFIK ( Reverse Proxy si Load Balancer )
-  # ==========================================
-  traefik:
-    image: traefik:v3.1
-    command:
-      - "--api.dashboard=true"
-      - "--api.insecure=true"
-      - "--entrypoints.web.address=:80"
-      - "--providers.swarm=true"
-      - "--providers.swarm.endpoint=unix:///var/run/docker.sock"
-      - "--providers.swarm.exposedbydefault=false"
+
+  # -----------------------------------------------------------------------
+  # 1. KONG — API Gateway, database-less (declarative) mode
+  #    port 80   : HTTP proxy (all client traffic)
+  #    port 8001 : Admin API (Prometheus scrapes /metrics here)
+  #    Placement : manager node (single entry point)
+  # -----------------------------------------------------------------------
+  kong:
+    image: kong:3.6-ubuntu
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
     ports:
-      - "80:80"
-      - "8088:8080"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - "80:8000"
+      - "8001:8001"
+    configs:
+      - source: kong_config
+        target: /etc/kong/kong.yml
+        mode: 0444
     networks:
-      - traefik-public
+      - frontend-net
+      - kong-net
     deploy:
+      replicas: 1
       placement:
         constraints:
           - node.role == manager
+      restart_policy:
+        condition: on-failure
 
-  # ==========================================
-  # 2. BACKEND SERVICE
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 2. BACKEND SERVICE — business logic, no direct DB access
+  #    Delegates all DB calls to data-service via HTTP
+  #    3 replicas: Kong distributes load automatically
+  #    Placement : worker nodes
+  # -----------------------------------------------------------------------
   backend:
     image: skylanders-backend:latest
-    build: ./backend-service
+    environment:
+      - DATA_SERVICE_URL=http://data-service:8082
+      - RABBITMQ_HOST=rabbitmq
+      - KC_ADMIN_USER=admin
+      - KC_ADMIN_PASS=parola_kc
+    volumes:
+      - uploads:/app/uploads
+    networks:
+      - kong-net
+      - backend-net
+    secrets:
+      - rabbitmq_user
+      - rabbitmq_pass
     deploy:
       mode: replicated
       replicas: 3
+      placement:
+        constraints:
+          - node.role == manager
       update_config:
         parallelism: 1
         delay: 10s
       restart_policy:
         condition: on-failure
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.backend.rule=PathPrefix(`/api`)"
-        - "traefik.http.services.backend.loadbalancer.server.port=8080"
-    depends_on:
-      - db
-      - rabbitmq
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
+        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
+        exec java -cp app.jar app.App
+
+  # -----------------------------------------------------------------------
+  # 3. DATA SERVICE — the ONLY microservice that touches PostgreSQL
+  #    Internal endpoints: /internal/* (not exposed through Kong)
+  #    Placement : worker node
+  # -----------------------------------------------------------------------
+  data-service:
+    image: skylanders-data-service:latest
     environment:
       - DB_HOST=db
       - DB_NAME=skylanders_shop
-      - RABBITMQ_HOST=rabbitmq
-    volumes:
-      - ../../frontend/Dan/public/assets:/app/uploads
     networks:
-      - traefik-public
+      - backend-net
+      - db-net
     secrets:
       - db_user
       - db_password
-      - rabbitmq_user
-      - rabbitmq_pass
-    command: java -cp app.jar app.App
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
     entrypoint:
       - /bin/sh
       - -c
       - |
         export DB_USER=$$(cat /run/secrets/db_user)
         export DB_PASSWORD=$$(cat /run/secrets/db_password)
-        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
-        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
-        echo "--> Starting Backend with command: $$@"
-        exec "$$@"
-      - --
+        exec java -cp app.jar dataservice.DataService
 
-  # ==========================================
-  # 3. EMAIL WORKER
-  # (imaginea se creeaza cu: docker tag skylanders-backend:latest skylanders-email-worker:latest)
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 4. EMAIL WORKER — consumes RabbitMQ queue, sends SMTP emails
+  #    Placement : worker node
+  # -----------------------------------------------------------------------
   email-worker:
     image: skylanders-email-worker:latest
-    deploy:
-      replicas: 1
-    depends_on:
-      - rabbitmq
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - SMTP_HOST=sandbox.smtp.mailtrap.io
+      - SMTP_PORT=587
+    networks:
+      - backend-net
     secrets:
       - smtp_user
       - smtp_pass
       - rabbitmq_user
       - rabbitmq_pass
-    networks:
-      - traefik-public
-    environment:
-      - RABBITMQ_HOST=rabbitmq
-      - SMTP_HOST=sandbox.smtp.mailtrap.io
-      - SMTP_PORT=587
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
     entrypoint:
       - /bin/sh
       - -c
@@ -106,50 +181,40 @@ services:
         export SMTP_PASS=$$(cat /run/secrets/smtp_pass)
         export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
         export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
-        echo "Starting EmailWorker..."
         exec java -cp app.jar app.EmailWorker
 
-  # ==========================================
-  # 4. RABBITMQ
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 5. RABBITMQ — message broker
+  #    port 5672  : AMQP (used by backend & email-worker)
+  #    port 15672 : Management UI (direct access)
+  #    port 15692 : Prometheus metrics (scraped internally)
+  #    Plugins enabled via Docker config: management + prometheus
+  # -----------------------------------------------------------------------
   rabbitmq:
-    image: rabbitmq:3-management
+    image: rabbitmq:3.12-management
     ports:
       - "5672:5672"
       - "15672:15672"
-    deploy:
-      mode: global
+    configs:
+      - source: rabbitmq_plugins
+        target: /etc/rabbitmq/enabled_plugins
+        mode: 0444
     networks:
-      - traefik-public
-    secrets:
-      - rabbitmq_user
-      - rabbitmq_pass
+      - backend-net
     environment:
-      RABBITMQ_USER_FILE: /run/secrets/rabbitmq_user
-      RABBITMQ_PASS_FILE: /run/secrets/rabbitmq_pass
-
-  # ==========================================
-  # 5. FRONTEND
-  # ==========================================
-  frontend:
-    image: skylanders-frontend:latest
-    build: ../../frontend/Dan
-    depends_on:
-      - backend
-    volumes:
-      - ../../frontend/Dan/public/assets:/usr/share/nginx/html/assets
+      RABBITMQ_DEFAULT_USER: "admin"
+      RABBITMQ_DEFAULT_PASS: "admin123"
     deploy:
       replicas: 1
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
-        - "traefik.http.services.frontend.loadbalancer.server.port=80"
-    networks:
-      - traefik-public
+      restart_policy:
+        condition: on-failure
 
-  # ==========================================
-  # 6. BAZA DE DATE ( POSTGRESQL )
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 6. POSTGRESQL — persistent store
+  #    DB skylanders_shop : product catalog + cart
+  #    DB keycloak        : Keycloak internal tables
+  #    Schema seeded by init.sql on first start
+  # -----------------------------------------------------------------------
   db:
     image: postgres:15
     environment:
@@ -159,17 +224,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - db-net
     secrets:
       - db_user
       - db_password
     deploy:
       replicas: 1
-    networks:
-      - traefik-public
+      restart_policy:
+        condition: on-failure
 
-  # ==========================================
-  # 7. KEYCLOAK
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 7. KEYCLOAK — OpenID Connect auth server
+  #    Uses keycloak DB in PostgreSQL
+  #    Kong routes: /realms /resources /js /welcome /auth
+  # -----------------------------------------------------------------------
   keycloak:
     image: quay.io/keycloak/keycloak:22.0.0
     environment:
@@ -179,20 +248,18 @@ services:
       - KC_DB_POOL_MIN_SIZE=5
       - KC_DB_POOL_MAX_SIZE=10
       - KC_PROXY=edge
-    depends_on:
-      - db
-    deploy:
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.keycloak.rule=PathPrefix(`/realms`) || PathPrefix(`/resources`) || PathPrefix(`/admin`) || PathPrefix(`/js`) || PathPrefix(`/welcome`)"
-        - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
     networks:
-      - traefik-public
+      - kong-net
+      - db-net
     secrets:
       - keycloak_admin_user
       - keycloak_admin_pass
       - db_password
       - db_user
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
     command: start-dev --import-realm
     entrypoint:
       - /bin/sh
@@ -205,9 +272,40 @@ services:
         exec /opt/keycloak/bin/kc.sh "$$@"
       - --
 
-  # ==========================================
-  # 8. PORTAINER ( Management UI Docker Swarm )
-  # ==========================================
+  # -----------------------------------------------------------------------
+  # 8. FRONTEND — React SPA served by nginx
+  #    Kong catch-all route: / (lowest regex_priority — matched last)
+  # -----------------------------------------------------------------------
+  frontend:
+    image: skylanders-frontend:latest
+    volumes:
+      - uploads:/usr/share/nginx/html/assets
+    networks:
+      - frontend-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  # -----------------------------------------------------------------------
+  # 9. ADMINER — PostgreSQL management UI
+  #    Kong route: /adminer
+  # -----------------------------------------------------------------------
+  adminer:
+    image: adminer:latest
+    networks:
+      - kong-net
+      - db-net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  # -----------------------------------------------------------------------
+  # 10. PORTAINER — Docker Swarm management UI
+  #     Kong route: /portainer  |  Direct access: port 9000
+  #     Placement : manager (needs docker.sock)
+  # -----------------------------------------------------------------------
   portainer:
     image: portainer/portainer-ce:latest
     ports:
@@ -215,42 +313,114 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
+    networks:
+      - kong-net
     deploy:
       replicas: 1
       placement:
         constraints:
           - node.role == manager
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.portainer.rule=PathPrefix(`/portainer`)"
-        - "traefik.http.services.portainer.loadbalancer.server.port=9000"
-    networks:
-      - traefik-public
+      restart_policy:
+        condition: on-failure
 
-  # ==========================================
-  # 9. ADMINER ( UI Baza de Date )
-  # ==========================================
-  adminer:
-    image: adminer:latest
+  # -----------------------------------------------------------------------
+  # 11. PROMETHEUS — metrics collector
+  #     Scrapes: backend:8080, data-service:8082, kong:8001,
+  #              rabbitmq:15692, node-exporter:9100
+  #     Kong route: /prometheus  |  Direct: port 9090
+  #     Placement : manager node
+  # -----------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
     ports:
-      - "8081:8080"
+      - "9090:9090"
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yml
+        mode: 0444
+    networks:
+      - kong-net
+      - backend-net
     deploy:
       replicas: 1
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.adminer.rule=PathPrefix(`/adminer`)"
-        - "traefik.http.services.adminer.loadbalancer.server.port=8080"
-    networks:
-      - traefik-public
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
 
+  # -----------------------------------------------------------------------
+  # 12. GRAFANA — observability dashboard
+  #     Prometheus datasource + Skylanders dashboard auto-provisioned
+  #     Kong route: /grafana  |  Login: admin / admin
+  #     Placement : manager node
+  # -----------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SERVER_ROOT_URL=http://localhost/grafana
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    configs:
+      - source: grafana_datasource
+        target: /etc/grafana/provisioning/datasources/prometheus.yml
+        mode: 0444
+      - source: grafana_dashboards_provider
+        target: /etc/grafana/provisioning/dashboards/dashboards.yml
+        mode: 0444
+      - source: grafana_dashboard_skylanders
+        target: /etc/grafana/provisioning/dashboards/skylanders.json
+        mode: 0444
+    networks:
+      - kong-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: on-failure
+
+  # -----------------------------------------------------------------------
+  # 13. NODE EXPORTER — host-level metrics (CPU, RAM, disk, network)
+  #     Mode: global = one instance per Swarm node
+  #     Prometheus scrapes port 9100
+  # -----------------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:latest
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    networks:
+      - backend-net
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+
+# =======================================================================
+# VOLUMES
+# =======================================================================
 volumes:
   postgres_data:
-    external: true
-  portainer_data:
+    external: true       # pre-create: docker volume create postgres_data
+  portainer_data:        # auto-created by Docker Swarm
+  grafana_data:          # auto-created; persists dashboards & alert rules
+  uploads:               # shared between backend (write) and frontend (read)
 
+# =======================================================================
+# SECRETS — all must be created BEFORE deploying the stack
+# Creation commands are listed in TUTORIAL_FINAL_ETAPA3.txt
+# =======================================================================
 secrets:
-  db_host:
-    external: true
   db_user:
     external: true
   db_password:
