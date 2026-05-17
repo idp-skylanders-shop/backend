@@ -156,12 +156,18 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "rabbitmq_queue_messages_ready",
-          "legendFormat": "{{ queue }}",
+          "expr": "rate(rabbitmq_global_messages_published_total[1m])",
+          "legendFormat": "Published msg/s",
           "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(rabbitmq_global_messages_delivered_total[1m])",
+          "legendFormat": "Delivered msg/s",
+          "refId": "B"
         }
       ],
-      "title": "RabbitMQ — Messages Ready in Queue",
+      "title": "RabbitMQ — Message Publish Rate",
       "type": "timeseries"
     }
   ],

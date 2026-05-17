@@ -61,6 +61,7 @@ services:
         paths:
           - /grafana
         strip_path: false
+        preserve_host: true
 
   # --- Prometheus (raw metrics, for debug) -------------
   - name: prometheus-ui

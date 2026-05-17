@@ -89,6 +89,8 @@ services:
     environment:
       - DATA_SERVICE_URL=http://data-service:8082
       - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin123
       - KC_ADMIN_USER=admin
       - KC_ADMIN_PASS=parola_kc
     volumes:
@@ -96,9 +98,6 @@ services:
     networks:
       - kong-net
       - backend-net
-    secrets:
-      - rabbitmq_user
-      - rabbitmq_pass
     deploy:
       mode: replicated
       replicas: 3
@@ -110,13 +109,6 @@ services:
         delay: 10s
       restart_policy:
         condition: on-failure
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
-        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
-        exec java -cp app.jar app.App
 
   # -----------------------------------------------------------------------
   # 3. DATA SERVICE — the ONLY microservice that touches PostgreSQL
@@ -157,6 +149,8 @@ services:
     image: skylanders-email-worker:latest
     environment:
       - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin123
       - SMTP_HOST=sandbox.smtp.mailtrap.io
       - SMTP_PORT=587
     networks:
@@ -164,8 +158,6 @@ services:
     secrets:
       - smtp_user
       - smtp_pass
-      - rabbitmq_user
-      - rabbitmq_pass
     deploy:
       replicas: 1
       placement:
@@ -179,8 +171,6 @@ services:
       - |
         export SMTP_USER=$$(cat /run/secrets/smtp_user)
         export SMTP_PASS=$$(cat /run/secrets/smtp_pass)
-        export RABBITMQ_USER=$$(cat /run/secrets/rabbitmq_user)
-        export RABBITMQ_PASS=$$(cat /run/secrets/rabbitmq_pass)
         exec java -cp app.jar app.EmailWorker
 
   # -----------------------------------------------------------------------
@@ -334,6 +324,10 @@ services:
     image: prom/prometheus:latest
     ports:
       - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--web.external-url=http://127.0.0.1/prometheus'
+      - '--web.route-prefix=/prometheus'
     configs:
       - source: prometheus_config
         target: /etc/prometheus/prometheus.yml
@@ -356,11 +350,16 @@ services:
   #     Placement : manager node
   # -----------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     environment:
-      - GF_SERVER_ROOT_URL=http://localhost/grafana
+      - GF_SERVER_DOMAIN=127.0.0.1
+      - GF_SERVER_ROOT_URL=http://127.0.0.1/grafana/
       - GF_SERVER_SERVE_FROM_SUB_PATH=true
       - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ALLOW_EMBEDDING=true
+      - GF_SECURITY_COOKIE_SAMESITE=disabled
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
       - grafana_data:/var/lib/grafana
     configs:
