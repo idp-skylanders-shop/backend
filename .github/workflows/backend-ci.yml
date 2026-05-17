@@ -6,8 +6,10 @@ on:
     paths:
       - 'backend/Mihai/backend-service/**'
       - 'backend/Mihai/email-worker/**'
+      - '.github/workflows/**' # Am adaugat asta ca sa porneasca cand modifici pipeline-ul
   pull_request:
     branches: [ main ]
+  workflow_dispatch: # Am adaugat butonul pentru rulare manuala
 
 jobs:
   build-and-push:
