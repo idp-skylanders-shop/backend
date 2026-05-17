@@ -1,0 +1,67 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'backend/Mihai/backend-service/**'
+      - 'backend/Mihai/email-worker/**'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache SBT dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ivy2/cache
+            ~/.sbt
+            ~/.m2
+          key: ${{ runner.os }}-sbt-${{ hashFiles('**/build.sbt') }}
+          restore-keys: |
+            ${{ runner.os }}-sbt-
+
+      - name: Build Backend JAR
+        working-directory: backend/Mihai/backend-service
+        run: sbt assembly
+
+      - name: Build Email Worker JAR
+        working-directory: backend/Mihai/email-worker
+        run: sbt assembly
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend/Mihai/backend-service
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-backend:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-backend:${{ github.sha }}
+
+      - name: Build and push Email Worker image
+        uses: docker/build-push-action@v5
+        with:
+          context: backend/Mihai/email-worker
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-email-worker:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/skylanders-email-worker:${{ github.sha }}
